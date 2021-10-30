@@ -596,6 +596,10 @@ def evalimage(net:Yolact, path:str, save_path:str=None, detections:Detections=No
 
     preds = net(batch, extras=extras)["pred_outs"]
 
+
+    # print("Export Yolact_edge to Onnx model")
+    # torch.onnx.export(net, batch, "yolact_edge.onnx", opset_version=11)
+
     img_numpy = prep_display(preds, frame, None, None, undo_transform=False)
 
     if args.output_coco_json:
@@ -1039,6 +1043,8 @@ def evaluate(net:Yolact, dataset, train_mode=False, train_cfg=None):
                         else:
                             with timer.env('Network Extra'):
                                 forward_out = net(batch)
+                        # print("Export Yolact_edge to Onnx model")
+                        # torch.onnx.export(net, batch, "yolact_edge.onnx", opset_version=11)
                         preds = forward_out["pred_outs"]
 
                         # Perform the meat of the operation here depending on our mode.
@@ -1095,6 +1101,10 @@ def evaluate(net:Yolact, dataset, train_mode=False, train_cfg=None):
                     extras = {"backbone": "full", "interrupt": False,
                               "moving_statistics": {"aligned_feats": []}}
                     preds = net(batch, extras=extras)["pred_outs"]
+
+                # Export model to Onnx
+                # print("Export Yolact_edge to Onnx model")
+                # torch.onnx.export(net, batch, "yolact_edge.onnx", opset_version=11)
 
                 # Perform the meat of the operation here depending on our mode.
                 if args.display:

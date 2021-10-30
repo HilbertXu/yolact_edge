@@ -891,6 +891,7 @@ class FPN_phase_1(ScriptModuleWrapper):
 
         out = []
         lat_feats = []
+
         x = torch.zeros(1, device=convouts[0].device)
         for i in range(len(convouts)):
             out.append(x)
@@ -912,6 +913,7 @@ class FPN_phase_1(ScriptModuleWrapper):
         
         for i in range(len(convouts)):
             out.append(lat_feats[i])
+        
         return out
 
 
@@ -1473,16 +1475,26 @@ class Yolact(nn.Module):
         torch.save(module.state_dict(), module_path)
 
     def trt_load_if(self, module_name, trt_fn, trt_fn_params, int8_mode=False, parent=None, batch_size=1):
-        if parent is None: parent=self
-        if not hasattr(parent, module_name): return
+        if parent is None: 
+            parent=self
+        if not hasattr(parent, module_name): 
+            return
+
+        # Target module to be converted
         module = getattr(parent, module_name)
+        
+
+        # Load a trt cache module from .trt file
         trt_cache = self.load_trt_cached_module(module_name, int8_mode, batch_size=batch_size)
+
+        # If no pre-converted .trt file, convert one and save it
         if trt_cache is None:
             module = trt_fn(module, trt_fn_params)
             self.save_trt_cached_module(module, module_name, int8_mode, batch_size=batch_size)
         else:
             module = trt_cache
-
+        
+        # replace the origin pytorch module with the converted TensorRT module
         setattr(parent, module_name, module)
 
     def to_tensorrt_backbone(self, int8_mode=False, calibration_dataset=None, batch_size=1):
@@ -1494,6 +1506,8 @@ class Yolact(nn.Module):
             trt_fn = partial(torch2trt, fp16_mode=True, strict_type_constraints=True, max_batch_size=batch_size)
 
         x = torch.ones((1, 3, cfg.max_size, cfg.max_size)).cuda()
+
+        # torch.onnx.export(self.backbone, x, "backbone.onnx", verbose=True, opset_version=11)
         # self.backbone = trt_fn(self.backbone, [x])
         # self.partial_backbone = trt_fn(self.partial_backbone, [x])
         self.trt_load_if("backbone", trt_fn, [x], int8_mode, batch_size=batch_size)
@@ -1508,6 +1522,7 @@ class Yolact(nn.Module):
             trt_fn = partial(torch2trt, fp16_mode=True, strict_type_constraints=True, max_batch_size=batch_size)
 
         x = torch.ones((1, 256, 69, 69)).cuda()
+        # torch.onnx.export(self.proto_net, x, "protonet.onnx", verbose=True, opset_version=11)
         # self.proto_net = trt_fn(self.proto_net, [x])
         self.trt_load_if("proto_net", trt_fn, [x], int8_mode, batch_size=batch_size)
 
@@ -1535,8 +1550,14 @@ class Yolact(nn.Module):
                 ]
         else:
             raise ValueError("Backbone: {} is not currently supported with TensorRT.".format(cfg.backbone.name))
-
+        print("convert to onnx")
+        print(x[0].shape)
+        print(x[1].shape)
+        print(x[2].shape)
+        # Convert fpn_phase_1
+        torch.onnx.export(self.fpn_phase_1, (x[0], x[1], x[2]), "fpn_phase_1.onnx", verbose=True, opset_version=11)
         self.trt_load_if("fpn_phase_1", trt_fn, x, int8_mode, batch_size=batch_size)
+
 
         if cfg.backbone.name == "ResNet50" or cfg.backbone.name == "ResNet101":
             x = [
@@ -1553,6 +1574,8 @@ class Yolact(nn.Module):
         else:
             raise ValueError("Backbone: {} is not currently supported with TensorRT.".format(cfg.backbone.name))
 
+        # Convert fpn_phase_2
+        torch.onnx.export(self.fpn_phase_2, (x[0], x[1], x[2]), "fpn_phase_2.onnx", verbose=True, opset_version=11)
         self.trt_load_if("fpn_phase_2", trt_fn, x, int8_mode, batch_size=batch_size)
 
         trt_fn = partial(torch2trt, fp16_mode=True, strict_type_constraints=True)
@@ -1618,21 +1641,27 @@ class Yolact(nn.Module):
 
         with timer.env('backbone'):
             if cfg.flow is None or extras is None or extras["backbone"] == "full":
+                print("Full backbone")
                 outs = self.backbone(x)
 
             elif extras is not None and extras["backbone"] == "partial":
                 if hasattr(self, 'partial_backbone'):
+                    print("Part backbone")
                     outs = self.partial_backbone(x)
                 else:
+                    print("Partial backbone")
                     outs = self.backbone(x, partial=True)
             
             else:
                 raise NotImplementedError
 
         if cfg.flow is not None:
+            print("Forward with flow")
             with timer.env('fpn'):
                 assert type(extras) == dict
                 if extras["backbone"] == "full":
+                    print("Full fpn")
+
                     outs = [outs[i] for i in cfg.backbone.selected_layers]
                     outs_fpn_phase_1_wrapper = self.fpn_phase_1(*outs)
                     outs_phase_1, lats_phase_1 = outs_fpn_phase_1_wrapper[:len(outs)], outs_fpn_phase_1_wrapper[len(outs):]
@@ -1640,9 +1669,10 @@ class Yolact(nn.Module):
                     moving_statistics = extras["moving_statistics"]
 
                     if extras.get("keep_statistics", False):
+                        print("keep stats")
                         outs_wrapper["feats"] = [out.detach() for out in outs_phase_1]
                         outs_wrapper["lateral"] = lateral
-
+                    print("wrap outs of fpn")
                     outs_wrapper["outs_phase_1"] = [out.detach() for out in outs_phase_1]
                 else:
                     assert extras["moving_statistics"] is not None
@@ -1715,9 +1745,11 @@ class Yolact(nn.Module):
         proto_out = None
         if cfg.mask_type == mask_type.lincomb and cfg.eval_mask_branch:
             with timer.env('proto'):
+                print("protoNet")
                 proto_x = x if self.proto_src is None else outs[self.proto_src]
                 
                 if self.num_grids > 0:
+                    print("Number of grids bigger than 1")
                     grids = self.grid.repeat(proto_x.size(0), 1, 1, 1)
                     proto_x = torch.cat([proto_x, grids], dim=1)
 
@@ -1735,12 +1767,14 @@ class Yolact(nn.Module):
                 # Move the features last so the multiplication is easy
                 proto_out = proto_out.permute(0, 2, 3, 1).contiguous()
 
+                # No default bias
                 if cfg.mask_proto_bias:
                     bias_shape = [x for x in proto_out.size()]
                     bias_shape[-1] = 1
                     proto_out = torch.cat([proto_out, torch.ones(*bias_shape)], -1)
 
         with timer.env('pred_heads'):
+            print("prediction heads")
             pred_outs = { 'loc': [], 'conf': [], 'mask': [], 'priors': [] }
 
             if cfg.use_instance_coeff:
